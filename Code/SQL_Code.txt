@@ -1,0 +1,248 @@
+/* select only zip code, population, and area from Census data */
+create view zips_cleaned as
+	select distinct ZCTA5, ZPOP, ZAREALAND
+	from zipcodes_2010
+go
+
+/* 
+Join the accident data with zip code data (population & land area)
+Create two new variables representing the day of the week and the month of the accident
+Calculate average wind speeds for each type of weather condition
+*/
+create view US_Accidents_Full as
+	select 
+
+	month(Start_Time) as Month,
+
+	case when datepart(dw, Start_Time) = 1 then 'Sunday'
+		when datepart(dw, Start_Time) = 2 then 'Monday'
+		when datepart(dw, Start_Time) = 3 then 'Tuesday'
+		when datepart(dw, Start_Time) = 4 then 'Wednesday'
+		when datepart(dw, Start_Time) = 5 then 'Thursday'
+		when datepart(dw, Start_Time) = 6 then 'Friday'
+		when datepart(dw, Start_Time) = 7 then 'Saturday'
+	end as Weekday,
+	* 
+	from US_Accidents_Dec19 as accidents
+	left outer join (select Weather_Condition as Weather_Cond, avg(Wind_Speed_mph) as Avg_Wind_Speed_mph from US_Accidents_Dec19 group by Weather_Condition) as windspeeds
+		on accidents.Weather_Condition = windspeeds.Weather_Cond
+	left outer join zips_cleaned as zips
+		on substring(accidents.Zipcode, 1, 5) = zips.ZCTA5
+go
+
+/*
+Further clean relevent data; detailed explanations included below
+*/
+create view US_Accidents_Cleaned as 
+	select
+		Severity,
+
+		Year(Start_Time) as Year,
+
+		Month, 
+
+		/* Is the day of the accident a holiday? */
+		case
+			when (Month = 1 and Day(Start_Time) = 1) /* New Year*/
+				or (Month = 1 and Weekday = 'Monday' and Day(Start_Time) > 14 and Day(Start_Time) < 22) /* MLK Day */
+				or (Month = 2 and Weekday = 'Monday' and Day(Start_Time) > 14 and Day(Start_Time) < 22) /* President's Day */
+				or (Month = 5 and Weekday = 'Monday' and Day(Start_Time) > 24) /* Memorial Day */
+				or (Month = 7 and Day(Start_Time) = 4) /* Independence Day */
+				or (Month = 9 and Weekday = 'Monday' and day(Start_Time) < 8) /* Labor Day */
+				or (Month = 10 and Weekday = 'Monday' and day(Start_Time) > 7 and day(Start_Time) < 15) /* Indigenous Peoples' Day */
+				or (Month = 11 and Day(Start_Time) = 11) /* Veterans' Day */
+				or (Month = 11 and Weekday = 'Thursday' and day(Start_Time) > 21 and day(Start_Time) < 29) /* Thanksgiving */
+				or (Month = 11 and Weekday = 'Friday' and day(Start_Time) > 22 and day(Start_Time) < 30) /* Black Friday */
+				or (Month = 12 and (day(Start_Time) = 24 or day(Start_Time) = 25) ) /* Christmas Eve & Christmas Day */
+				then 'True'
+			else 'False'
+		end as Is_Holiday,
+
+		/* Dummy variable for day of the week */
+		Weekday,
+
+		/* Time of day */
+		datepart(hour, Start_Time) as Hour,
+
+		/* Duration of accident */
+		datediff(minute, Start_Time, End_Time) as Duration_minutes,
+		
+		/* Location Data */
+		Start_Lat,
+		Start_Lng,
+
+		/* Distance of road impacted */
+		Distance_mi,
+
+		/* 
+		Restructure "Description" into more useful columns: 
+			- number of lanes closed 
+			- whether the shoulder of the road is blocked by the accident
+			- whether the the accident slows traffic
+		*/
+		case
+			when Description like '%ane blocked%' or Description like '%ane closed%'
+				then 1
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Two%'
+				then 2
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Three%'
+				then 3
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Four%'
+				then 4
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Five%'
+				then 5
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Six%'
+				then 6
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Seven%'
+				then 7
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Eight%'
+				then 8
+			when (Description like '%anes blocked%' or Description like '%anes closed%') and Description like 'Nine%'
+				then 9
+			when (Description like '%anes blocked%' or Description like '%anes closed%')
+				then 2
+			else 0
+		end as Lanes_Blocked,
+
+		case
+			when Description like '%oulder blocked%' or Description like '%oulder closed%'
+				then 'True'
+			else 'False'
+		end as Shoulder_Blocked,
+	
+		case 
+			when Description like '%slow traffic%' 
+				then 'True'
+			else 'False'
+		end as Slow_Traffic,
+	
+		/* Create a variable representing road type */
+		case
+			when Street like 'I-%' or Street like concat(State, '-%')
+				or Street like '%Freeway%' or Street like '%Fwy%'
+				or Street like '%Interstate%'
+				or Street like '%Beltway%' or Street like '%Bltwy%'
+				or Street like '%Tollway%'
+				or Street like '%Turnpike%' or Street like '%Tpke%' or Street like '% Pike%'
+				then 'Freeway'
+			when Street like '%Highway%' or Street like '%Hwy%'
+				or Street like '%Parkway%' or Street like '%Pkwy%'
+				or Street like '%Express%' or Street like '%Expy%'
+				or Street like 'US-%' or Street like 'US %' or Street like '%Route %'
+				or Street like '%Bridge%' or Street like '% Brg%' 
+				then 'Highway'
+			when Street like '%Boulevard%' or Street like '%Blvd%'
+				then 'Boulevard'
+			when Street like '%Ave%' or Street like '%Avenue%'
+				or Street like '% St%' or Street like '%Street%'
+				then 'Street/Ave'
+			when Street like '% Rd%' or Street like '%Road%'
+				or Street like '% Way%' or Street like '% Wy%'
+				or Street like '%Drive%' or Street like '% Dr' or Street like '% Dr %'
+				or Street like '%Lane%' or Street like '% Ln' or Street like '% Ln %'
+				or Street like '%Circle%' or Street like '% Cir' or Street like '% Cir %'
+				then 'Road'
+			when Street like '% Pl' or Street like '% Pl %'
+				or Street like '% Court%' or Street like '% Ct' or Street like '% Ct %'
+				then 'dead_end'	
+		end as Street_Type,
+
+		/* Basic location data to use as control dummies in analysis */
+		City,
+		County,
+		State,
+
+		/* Include basic weather variables */
+		Temperature_F,
+		Pressure_in,
+		Visibility_mi, 
+
+		/* fill in precipitation missing values where they are known */
+		case
+			when (Precipitation_in is null) and (Weather_Condition is not null)
+				then 0
+			else Precipitation_in
+		end as Precipitation_in,
+
+		/* wind & wind speed - fill in some missing values */
+		case
+			when Wind_Speed_mph is null and (Wind_Direction like 'Calm' or Wind_Direction like 'CALM')
+				then 0
+			when Wind_Speed_mph is null
+				then Avg_Wind_Speed_mph
+			else Wind_Speed_mph
+		end as Wind_Speed_mph,
+
+		/* 
+		Separate weather condition into mutliple boolean variables as follow:
+			- Weather is clear
+			- Weather is overcast
+			- weather is dusty
+			- weather is icy
+			- weather is stormy
+		*/
+		case
+			when Weather_Condition like '%Clear%' or Weather_Condition like '%Fair%' or Weather_Condition like '%Partly%'
+				or Weather_Condition like '%Scattered%'
+				then 'True'
+			else 'False'
+		end as Weather_Clear,
+		case
+			when Weather_Condition like '%Cloud%' or Weather_Condition like '%Drizzle%' or Weather_Condition like '%Snow%' 
+				or Weather_Condition like '%Fog%' or Weather_Condition like '%Rain%' or Weather_Condition like '%Hail%'
+				or Weather_Condition like '%Heavy%' or Weather_condition like '%Mist%' or Weather_Condition like '%Pellets%' 
+				or Weather_Condition like '%Light%' or Weather_Condition like '%Sleet%' or Weather_Condition like '%Squall%' 
+				or Weather_Condition like '%Thunder%' or Weather_Condition like '%Wintry%' or Weather_Condition like '%Overcast%'
+				then 'True'
+			else 'False'
+		end as Weather_Overcast,
+		case
+			when Weather_Condition like '%Dust%' or Weather_Condition like '%Sand%' or Weather_Condition like '%Ash%'
+				then 'True'
+			else 'False'
+		end as Weather_Dusty, 
+
+		case
+			when Weather_Condition like '%Freezing%' or Weather_Condition like '%Hail%' or Weather_Condition like '%Snow%' 
+				or Weather_Condition like '%Ice%' or Weather_Condition like '%Sleet%' or Weather_Condition like '%Wintry Mix%'
+				then 'True'
+			else 'False'
+		end as Weather_Icy,
+		case
+			when Weather_Condition like '%Blowing%' or Weather_Condition like '%Funnel%' or Weather_Condition like '%Heavy%' 
+				or Weather_Condition like '%Squall%' or Weather_Condition like '%torm%' or Weather_Condition like '%Tornado%'
+				then 'True'
+			else 'False'
+		end as Weather_Stormy, 
+
+		/* Recategorize day/night data into a single variable representing lighting levels */
+		case
+			when Sunrise_Sunset like 'Night' and Civil_Twilight like 'Night' and Nautical_Twilight like 'Night' and Astronomical_Twilight like 'Night'
+				then 'Night'
+			when Sunrise_Sunset like 'Day' and Civil_Twilight like 'Day' and Nautical_Twilight like 'Day' and Astronomical_Twilight like 'Day'
+				then 'Day'
+			when Sunrise_Sunset is not null and Civil_Twilight is not null and Nautical_Twilight is not null and Astronomical_Twilight is not null
+				then 'Twilight'
+		end as Daylight,
+
+		/* Presense of particular features in nearby locations */
+		Bump,
+		Crossing,
+		Give_Way,
+		Junction,
+		No_Exit, 
+		Railway,
+		Roundabout,
+		Station, 
+		Stop,
+		Traffic_Calming,
+		Traffic_Signal,
+		Turning_Loop,
+
+		/* population density */
+		ZPOP/ZAREALAND as Pop_Density_pplPerMeter
+
+	from US_Accidents_Full
+go
+
+select * from US_Accidents_Cleaned
